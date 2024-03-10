@@ -81,7 +81,14 @@ def probability(a, b, sport, g = .5):
     saved_probs[(a,b)] = prob
     return prob
 
-def get_elos(games, sport):
+
+#load games exported from save_to_csv(game_list)
+def load_games(filename):
+    pass
+
+#add functionality for trials
+
+def get_elos(games, trials, sport):
     elos = defaultdict(lambda: 1600.0)
     sensitivity = 600.0
     l = len(games)
@@ -104,7 +111,7 @@ def get_elos(games, sport):
 
 games = get_games("CBB", 2024)
 save_to_csv(games, "CBB(3-9-24)GAMES")
-elos = get_elos(games, "CBB")
+elos = get_elos(games, 100, "CBB")
 save_to_csv(elos, "CBB(3-9-24)ELOS")
 
 # sport = "NFL"
