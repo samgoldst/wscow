@@ -3,6 +3,8 @@ import re
 import json
 import requests
 import csv
+import numpy as np
+import math
 import time
 from random import randint
 from collections import defaultdict
@@ -18,14 +20,14 @@ teams_by_sport = {"NFL": ["ARIZONA", "ATLANTA", "BALTIMORE", "BUFFALO", "CAROLIN
 
 saved_probs = {}
 
-def get_games(sport, season):
+def get_games(sport, season, all):
     teams = teams_by_sport[sport]
     all_games = []
 
     for team in teams:
         if sport == "NFL": html = requests.get(f"https://statfox.com/nfl/gamelog.asp?teamid={team}&season={season}").text
         if sport == "CFB": html = requests.get(f"https://statfox.com/cfb/gamelog.asp?teamid={team}&season={season}").text
-        if sport == "CBB": html = requests.get(f"https://statfox.com/cbb/cbbteam.asp?teamid={team}&season={season}").text
+        if sport == "CBB": html = requests.get(f"https://statfox.com/cbb/cbbteam.asp?teamid={team}&season={season}&log={all}").text
 #         if sport == "NBA": html = requests.get(f"https://statfox.com/nba/nbateam.asp?teamid={team}&season={season}").text
         soup = BeautifulSoup(html, 'html.parser')
 #         if sport == "NBA":
@@ -36,7 +38,6 @@ def get_games(sport, season):
 #         else:
         ind = 13
         table  = soup.find_all("tr")[ind]
-
         rows = []
         for i, row in enumerate(table.find_all('tr')):
             if i == 0:
@@ -68,7 +69,7 @@ def elo(old, exp, score, k):
 def expected(A, B):
     return 1 / (1 + 10 ** ((B - A) / 400))
 
-def probability(a, b, sport, g = .5):
+def game_score(a, b, sport, g = .5):
     c = get_c(sport)
     if (a,b) in saved_probs:
         return saved_probs[(a,b)]
@@ -81,46 +82,128 @@ def probability(a, b, sport, g = .5):
     saved_probs[(a,b)] = prob
     return prob
 
-
-#load games exported from save_to_csv(game_list)
 def load_games(filename):
-    pass
+    games = []
+    file = open(filename)
+    csvreader = csv.reader(file)
+    for game in csvreader:
+        games.append([game[0], int(game[1]), game[2], int(game[3])])
+    file.close()
+    return games
 
-#add functionality for trials
+def get_elos(games, trials, d, sport,  starting_elos = {}):
+    s = 1 - (10/d)
+    d = d // 100
+    trial_elos = {}
+    for team in teams_by_sport[sport]:
+        trial_elos[team] = []
+    for trial in range(trials):
+        if len(starting_elos) == 0:
+            elos = defaultdict(lambda: 1600)
+        else:
+            elos = starting_elos.copy()
+        sensitivity = 600.0
+        l = len(games)
+        for t in range(100):
+            for i in range(d):
+                sensitivity *= s
+                game = games[randint(1, l-1)]
+                winner = game[0]
+                winner_score = int(game[1])
+                loser = game[2]
+                loser_score = int(game[3])
+                winner_exp = expected(elos[winner], elos[loser])
+                loser_exp = 1 - winner_exp
+                winner_prob = game_score(winner_score, loser_score, sport)
+                loser_prob = 1 - winner_prob
+                elos[winner] = elo(elos[winner], winner_exp, winner_prob, k=sensitivity)
+                elos[loser] = elo(elos[loser], loser_exp, loser_prob, k=sensitivity)
+            print("\r" + "{:.2f}".format(((100 * trial / trials) + (t/trials))) + "% done with elos", end="")
+        for team in teams_by_sport[sport]:
+            trial_elos[team].append(elos[team])
+    print("\rFINISHED CALCULATING ELOS!!        ")
+    return [(k, *v) for k, v in trial_elos.items()]
 
-def get_elos(games, trials, sport):
-    elos = defaultdict(lambda: 1600.0)
-    sensitivity = 600.0
-    l = len(games)
-    for t in range(1000):
-        for i in range(10000):
-            sensitivity *= 0.999999
-            game = games[randint(1, l-1)]
-            winner = game[0]
-            winner_score = int(game[1])
-            loser = game[2]
-            loser_score = int(game[3])
-            winner_exp = expected(elos[winner], elos[loser])
-            loser_exp = 1 - winner_exp
-            winner_prob = probability(winner_score, loser_score, sport)
-            loser_prob = 1 - winner_prob
-            elos[winner] = elo(elos[winner], winner_exp, winner_prob, k=sensitivity)
-            elos[loser] = elo(elos[loser], loser_exp, loser_prob, k=sensitivity)
-        print(f"\r{(t + 1)/10}% done with elos         ", end="")
-    return [(k, v) for k, v in dict(sorted(elos.items(), key=lambda item: item[1])).items()]
+def recalculate_team(team, all_games, elos, sims, sport):
+    team_elos = []
+    applicable_games = []
+    for g in games:
+        if g[0] == team:
+            applicable_games.append(['W', g[2], float(elos[g[2]]), int(g[1]), int(g[3])])
+        if g[2] == team:
+            applicable_games.append(['L', g[0], float(elos[g[0]]), int(g[1]), int(g[3])])
+        l = len(applicable_games)
+    if l == 0:
+        return -1
+    for i in range(100):
+        team_elo = float(elos[team])
+        sensitivity = 5
+        s = 1 - (10/sims)
+        for t in range(sims):
+            sensitivity *= s
+            game = applicable_games[randint(1, l-1)]
+            if game[0] == 'W':
+                team_exp = expected(team_elo, game[2])
+                team_score = game_score(game[3], game[4], sport)
+                team_elo = elo(team_elo, team_exp, team_score, k=sensitivity)
+            if game[0] == 'L':
+                team_exp = expected(team_elo, game[2])
+                team_score = 1 - game_score(game[3], game[4], sport)
+                team_elo = elo(team_elo, team_exp, team_score, k=sensitivity)
+        team_elos.append(team_elo)
+    return [np.mean(team_elos), np.var(team_elos)**(1/2)]
 
-games = get_games("CBB", 2024)
-save_to_csv(games, "CBB(3-9-24)GAMES")
-elos = get_elos(games, 100, "CBB")
-save_to_csv(elos, "CBB(3-9-24)ELOS")
+def recalculate_all_teams(elos, games, sims_per_team, sport):
+    new_elos = {}
+    for team in elos:
+        print(f"\r{team}", end="")
+        new_elo = recalculate_team(team, games, elos, sims_per_team, sport)
+        if new_elo == -1:
+            continue
+        new_elos[team] = new_elo
+    return [[k, *v] for k, v in new_elos.items()]
 
-# sport = "NFL"
+def load_processed_elos(filename):
+    elos = {}
+    file = open(filename)
+    csvreader = csv.reader(file)
+    for team in csvreader:
+        elos[team[0]] = team[5]
+    file.close()
+    return elos
+
+def average_elos(elos):
+    output = []
+    for item in elos:
+#         output[item[0]] = [np.percentile(item[1:], n * 10) for n in range(0, 11)]
+        output.append([item[0], *[np.percentile(item[1:], n * 10) for n in range(0, 11)]])
+    return output
+
+# games = get_games("CBB", 2024, 1)
+# save_to_csv(games, "CBB_GAMES_L20_2024")
+games = load_games("CBB_GAMES_L20_2024.csv")
+elos = load_processed_elos("CBB_ELOS_ALL_2024.csv")
+# elos = get_elos(games, 250, 1000000, "CBB")
+# processed_elos = average_elos(elos)
+# print(processed_elos)
+new_elos = recalculate_all_teams(elos, games, 1000, "CBB")
+save_to_csv(new_elos, "CBB_ELOS_L20_2024")
+# save_to_csv([[k, *v] for k, v in processed_elos.items()], f"CBB_ELOS_ALL_2024")
+
+# elos_by_season = {}
+# for team in teams_by_sport["NFL"]:
+#     elos_by_season[team] = []
 #
-# for season in range(2000, 2025):
+# for season in range(1999, 2024):
 #     print(season)
-#     games = get_games(sport, season)
-#     save_to_csv(games, f"{season}_{sport}_games")
-#     print(f"\rgames saved to {season}_{sport}_games")
-#     elos = get_elos(games, sport)
-#     save_to_csv(elos, f"{season}_{sport}_elos")
-#     print(f"\relos saved to {season}_{sport}_elos")
+#     games = get_games("NFL", season)
+# #     games = load_games(f"NFL({season})GAMES.csv")
+#     save_to_csv(games, f"NFL({season})GAMES")
+#     elos = get_elos(games, 16, 1000000, "NFL")
+#     processed_elos = average_elos(elos)
+#     for team in teams_by_sport["NFL"]:
+#         elos_by_season[team].append(processed_elos[team][0])
+#     save_to_csv([[k, *v] for k, v in processed_elos.items()], f"NFL({season})ELOS")
+#
+# for team in teams_by_sport["NFL"]:
+#     print(team, ":", elos_by_season[team])
